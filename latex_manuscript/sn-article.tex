@@ -1,0 +1,422 @@
+%Entropy-Gated Contrastive Decoding manuscript
+%Formatted with Springer Nature LaTeX template (sn-jnl v3.1, December 2024)
+%Target journal: Applied Intelligence (Springer, journal 10489)
+%Reference style: Basic Springer Nature (Numbered)
+
+\documentclass[pdflatex,sn-basic,Numbered]{sn-jnl}
+
+%%%% Standard Packages
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{mathrsfs}
+\usepackage[title]{appendix}
+\usepackage{xcolor}
+\usepackage{textcomp}
+\usepackage{manyfoot}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmicx}
+\usepackage{algpseudocode}
+\usepackage{listings}
+\usepackage{url}
+%%%%
+
+%%%% Theorem styles (kept from template in case needed)
+\theoremstyle{thmstyleone}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}[theorem]{Proposition}
+
+\theoremstyle{thmstyletwo}
+\newtheorem{example}{Example}
+\newtheorem{remark}{Remark}
+
+\theoremstyle{thmstylethree}
+\newtheorem{definition}{Definition}
+
+\raggedbottom
+
+\begin{document}
+
+\title[Entropy-Gated Contrastive Decoding for VLMs]{Entropy-Gated Contrastive Decoding: Mitigating Visual Inertia and Multimodal Hallucinations in Vision-Language Models}
+
+%%=============================================================%%
+%% Author block. Replace with the actual author list before
+%% submitting to the journal.
+%%=============================================================%%
+
+\author*[1]{\fnm{First} \sur{Author}}\email{corresponding.author@example.org}
+
+\author[1]{\fnm{Second} \sur{Author}}\email{second.author@example.org}
+
+\author[1]{\fnm{Third} \sur{Author}}\email{third.author@example.org}
+
+\affil*[1]{\orgdiv{Department of Computer Science}, \orgname{Affiliation Name}, \orgaddress{\street{Street Address}, \city{City}, \postcode{000000}, \state{State}, \country{Country}}}
+
+\abstract{Vision-Language Models answer relational questions about objects well below their recognition accuracy. On the relation subset of the AMBER benchmark, most mainstream systems score near 0.7 accuracy, and the errors follow a measurable pattern: cross-attention settles on the earliest salient objects, the grounding signal decays as decoding proceeds, and pre-trained language priors finish the answer. We target this mechanism, Visual Inertia, at decoding time. We present Entropy-Gated Contrastive Decoding (EGCD), a training-free inference framework, calibrated once per model on a small tuning split, that decides per query. Before decoding starts, EGCD computes the Shannon entropy of the first-token distribution. Low entropy means the model has already resolved the query, and standard greedy decoding proceeds. An entropy spike signals conflict between visual evidence and the language prior, and routes the query to a counterfactual contrastive pathway: a second forward pass omits the image, an Adaptive Plausibility Constraint bounds the contrast to plausible tokens, and the isolated language prior is subtracted from the expert logits. On 1,664 binary relation questions from AMBER, with the threshold picked on a tuning split and every result reported on the held-out half, we evaluate seven open-weight models. EGCD raises the biased architectures over their greedy baselines: Qwen2-VL-2B from 71.50\% to 80.89\% balanced accuracy, Phi-3-Vision-4.2B from 70.18\% to 77.50\%, and SmolVLM2-2.2B from 63.80\% to 68.07\%. On structurally sound models such as the LLaVA models, where universal contrastive decoding collapses balanced accuracy to 63.06\%, the gate stays idle and returns the baseline exactly. Gating on predictive uncertainty turns contrastive decoding into a conditional, architecture-aware intervention: applied where it heals, withheld where it harms.}
+
+\keywords{Vision-language models, Contrastive decoding, Multimodal hallucination, Visual inertia, Entropy-based routing}
+
+\maketitle
+
+\section{Introduction}\label{sec:intro}
+
+Large Vision-Language Models integrate visual perception with autoregressive text generation \cite{liu2023visual} and caption images, answer questions, and follow multimodal instructions with high fluency. Their record on fine-grained spatial and relational reasoning is far weaker. On the relation subset of AMBER, most mainstream models score near 0.7 accuracy on questions that ask whether two objects touch, align, or support each other, and even the strongest systems misjudge contact and alignment between objects \cite{wang2023amber}. Perturbation makes the same point from a different angle. Rotating images or adding noise brings down relational accuracy across open and closed models, but object recognition barely changes \cite{shin2026when}. Layout probes find the same pattern: when the structure is compositional, models fall back on non-visual shortcuts instead of actually reading the scene \cite{brown2025hallucination,chen2024spatialvlm}. The errors are generated, not perceived. Cross-attention locks onto the earliest salient objects and stays there, which is what \cite{gong2026attention} call Visual Inertia (Section~\ref{sec:related}), and that puts the failure inside decoding rather than at the input.
+
+The standard tool against distribution-level hallucination is Contrastive Decoding, which contrasts an expert distribution with a weaker amateur and subtracts the difference \cite{leng2024mitigating}. Applied uniformly, it has a documented failure mode (Section~\ref{sec:related}): much of its benchmark gain can come from a yes-ward shift of the output distribution rather than better grounding. Hidden-state interventions steer activations directly and avoid the logit arithmetic, but they can entangle unrelated features and disturb the natural generation behavior of the model \cite{su2025activation,zhang2026mitigating}. What is missing is a way to apply the correction only where the failure actually occurs, and to leave every other query untouched.
+
+We propose Entropy-Gated Contrastive Decoding (EGCD), a training-free, zero-shot routing framework built around one observation: the conflict between visual evidence and language prior is visible in the first-token distribution before decoding starts. The router reads the Shannon entropy of that distribution. Low entropy means the model is confident and its priors are safe to trust. A sharp entropy spike marks vision-text conflict and activates a counterfactual contrastive pass that isolates the language prior and subtracts it, bounded by an Adaptive Plausibility Constraint. The same gate that heals biased architectures stays idle on structurally sound ones, which no uniform scheme can do. Our contributions are as follows:
+
+\begin{enumerate}
+\item An operationalization of Visual Inertia \cite{gong2026attention} as a decoding-time signal. We take their attention-stagnation account and reduce it to a measurable probe: the first-token distribution, where entropy separates correct from incorrect answers on every model with per-item data (AUC 0.62 to 0.75). This is what motivates intervention at decoding time.
+
+\item EGCD, a training-free routing mechanism that uses first-token Shannon entropy as a real-time conflict probe and triggers counterfactual contrastive decoding only under active vision-text conflict. The gate adds no parameters, requires no sampling, and reads a statistic, the standard pass computes anyway.
+
+\item A cross-architecture study on AMBER showing that contrastive interventions should be conditional: EGCD lifts balanced accuracy by up to 9.39 points on biased architectures and stays idle on structurally sound ones, avoiding the 13.7-point collapse that universal contrastive decoding inflicts on naturally balanced models.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work on visual inertia, contrastive decoding, and uncertainty-based routing. Section~\ref{sec:method} introduces our proposed methodology, detailing the entropy gate and the counterfactual contrastive pathway. Section~\ref{sec:experiments} describes the experimental setup, including the AMBER benchmark, models, and baselines. Section~\ref{sec:results} presents the results and analysis across seven vision-language models. Finally, Section~\ref{sec:conclusion} concludes the paper and outlines limitations and future work.
+
+\section{Related Work}\label{sec:related}
+
+\subsection{Visual Inertia and Relational Hallucinations}\label{subsec:visual-inertia}
+
+Hallucination benchmarks have moved well beyond simple object-existence checks. POPE samples object presence in a balanced way \cite{li2023bevaluating}; CHAIR counts invented objects in captions \cite{rohrbach2018object}; MME spans perceptual and cognitive tasks \cite{fu2025mme}; and AMBER adds a discriminative relation subset of 1,664 image-text pairs \cite{wang2023amber}. Relational queries are the hardest of the lot. A model has to bind two objects and then check a predicate between them, and that binding step is exactly what attention stagnation disrupts. The evidence comes from more than one direction. Rotation and noise take down relational accuracy while recognition survives \cite{shin2026when}; spatial benchmarks keep turning up shortcut heuristics that skip the grounded binding step \cite{brown2025hallucination,chen2024spatialvlm}; and surveys of the field still list compositional failure as an open problem for vision-language modeling \cite{bordes2024towards}.
+
+\cite{gong2026attention} call this mechanism Visual Inertia: attention to semantically critical regions settles early and then stays fixed, so the model never inspects the secondary objects that a relational query targets. Their counterfactual experiment is straightforward. An inertia-inducing intervention reduces visual activeness from 41.52 to 19.24 and the relation score from 63.96 to 47.25, which is the largest decline among their controls. Two consequences follow for intervention design. First, uniform attention amplification cannot help, because scaling a settled map only reinforces the settlement \cite{gong2026attention,chen2026mitigating}. Second, once the visual signal freezes, unimodal language priors dominate the deeper layers; this dominance has now been traced to specific FFN modules \cite{guo2026fade} and is the target of prior-suppression decoding methods \cite{ren2026nolan,min2025mitigating}. EGCD is designed around both of these points: it avoids uniform attention amplification and directly counteracts the language-prior dominance at decoding time.
+
+\subsection{Contrastive Decoding and Hidden-State Interventions}\label{subsec:contrastive}
+
+Contrastive decoding was first introduced for open-ended text generation, where an expert distribution is contrasted with the output of a weaker amateur model \cite{li2023acontrastive,su2022empirical}. Visual Contrastive Decoding (VCD) adapted this idea to hallucination research by using a Gaussian-noised image as the amateur, with an Adaptive Plausibility Constraint (APC) that restricts the contrast to plausible tokens \cite{leng2024mitigating}. Subsequent variants have replaced the amateur with instruction distractors \cite{wang2024mitigating}, shallow-layer estimates \cite{huo2025self}, counterfactual masks \cite{xiao2026macd}, or an omitted visual prompt \cite{favero2024multi}. More recent work modulates the contrast adaptively based on query type or entropy \cite{im2025selfaug,huang2026chasd}.
+
+The uniform application of this recipe has a documented failure mode. \cite{yin2025mirage} show that the reported POPE gains of contrastive methods come largely from a yes-ward shift in the output distribution, and that under sampling, the APC degrades decoding into an approximation of greedy search; a spurious prompt adjustment can reproduce the same numbers. A reproducibility study by \cite{bendre2026rethinking} extends this critique across multiple models and decoding regimes. Hidden-state interventions take a different approach by editing activations rather than logits, including layer-wise logit contrast \cite{chuang2024dola}, bidirectional activation steering \cite{su2025activation}, and selective interventions that attempt to leave the token distribution intact \cite{wang2025contextfocus,zhang2026mitigating}. However, steering signals can entangle unrelated features and shift the model away from its natural generation behavior. EGCD operates at the logit level, runs only under detected conflict, and decodes greedily, which closes off the sampling-collapse route to spurious gains by construction. Section~\ref{sec:results} evaluates both under one protocol and shows that where each method helps, harms, or does nothing depends on the amateur and on the model.
+
+\subsection{Uncertainty Estimation and Dual-Process Routing}\label{subsec:uncertainty}
+
+Dual-process theories split cognition into a fast, automatic mode and a slower, deliberate one \cite{wason1974dual,kahneman2011thinking}, and the same split now runs through reasoning research on LLMs \cite{li2025system}. DynaThink, for instance, routes a question to fast thinking only when sampled chains agree and the majority answer needs the fewest reasoning steps \cite{pan2024dynathink}; HaluSearch interleaves fast and slow search to cut hallucination \cite{cheng2025think}. The catch is that both routers verify by sampling. Computing the routing signal costs more than producing the answer it guards.
+
+Octopus is the closest prior work to ours. It learns a per-step router that picks among contrastive variants through a trained decision token \cite{suo2025octopus}. The learned router covers more cases, but it needs a preference-optimization stage and pays overhead at every token. Probing studies suggest cheaper routes: linear probes pull structured information out of intermediate representations \cite{alain2016understanding}, and tuned lenses recover latent predictions layer by layer \cite{belrose2023eliciting}. EGCD uses none of this: it routes once per query, on a first-token statistic the standard pass already produces.
+
+\section{Methodology}\label{sec:method}
+
+This section formalizes EGCD: the notation, the gate, and the corrective pathway. Figure~\ref{fig:overview} traces a relational query through both routes to the final response.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig1.png}
+\caption{Overview of Entropy-Gated Contrastive Decoding. A relational query enters the frozen VLM; the first-token entropy $H(Y_{1})$ is compared against $\tau$, and the query is routed to System 1 (greedy decoding) or System 2 (counterfactual contrastive decoding with APC; $\alpha = 1.0$, $\beta = 0.1$).}\label{fig:overview}
+\end{figure}
+
+\subsection{Problem Formulation and Visual Inertia}\label{subsec:problem}
+
+Let $\theta$ denote the parameters of a model, frozen at inference time, and let $V$ denote its vocabulary. The input is a tuple $(X_{v}, X_{t})$ of a visual scene and a text prompt, and autoregressive decoding produces $Y = (y_{1}, \ldots, y_{T})$. At step $t$ the standard expert multimodal pass assigns
+\begin{equation}\label{eq:std}
+P_{\text{std}}(y_{t} \mid X_{v}, X_{t}, Y_{<t}) = \text{softmax}\bigl(z_{\text{std}}(y_{t})\bigr),
+\end{equation}
+where $z_{\text{std}}(y_{t})$ collects the vocabulary logits of that forward pass.
+
+Visual Inertia \cite{gong2026attention} is the failure mode we target. The spatial cross-attention map stays anchored to early salient objects as decoding proceeds, so the grounding signal decays and the statistical language prior takes over the next-token distribution. In binary relation tasks the decoder defaults to conservative answers and stereotypical co-occurrences \cite{yin2025mirage}. The substitution is measurable: it shows up as probability placed on answer tokens that the image does not support. A correction has to fire exactly when this substitution happens, and stay quiet otherwise.
+
+\subsection{Query-Level Entropy Gating and Dual-Process Routing}\label{subsec:gate}
+
+Penalizing logits at every step taxes queries that need no help, so we treat decoding as a dual-process system \cite{kahneman2011thinking} and route once, at the query level. The probe is the Shannon entropy \cite{shannon1948mathematical} of the first-token distribution over the vocabulary $V$:
+\begin{equation}\label{eq:entropy}
+H(Y_{1}) \;=\; -\sum_{y \in V} P_{\text{std}}(y \mid X_{v}, X_{t})\, \log P_{\text{std}}(y \mid X_{v}, X_{t}).
+\end{equation}
+
+A peaky distribution yields low entropy. When language priors and visual evidence diverge at the relational decision point, probability mass diffuses across candidates and entropy spikes. Binary relation questions happen to make this convenient. The first token the model emits is the answer itself, so the whole vision-text decision is contained in this single distribution.
+
+A single threshold $\tau$ separates the two cases. Queries with $H(Y_{1}) < \tau$ are treated as settled: their priors can be trusted, and System 1 answers it with standard greedy decoding, giving $Y_{\text{std}}$. When $H(Y_{1}) \geq \tau$, the entropy spike is taken as a sign of vision-text conflict, and the query goes to the corrective System 2 pathway, which returns $Y_{\text{CD}}$. The gate reads a forward-pass statistic that System 1 already produces, so the check itself is free. The extra cost (one counterfactual forward pass) falls only on queries that actually route to System 2.
+
+\subsection{Counterfactual Isolation and Adaptive Plausibility Constraint}\label{subsec:apc}
+
+System 2 isolates the language prior through a counterfactual forward pass that removes the visual input entirely \cite{favero2024multi}:
+\begin{equation}\label{eq:cf}
+z_{\text{cf}}(y_{t}) \;=\; \text{logit}_{\theta}\bigl(y_{t} \mid X_{t}, Y_{<t}\bigr).
+\end{equation}
+
+The vector $z_{\text{cf}}$ represents the unimodal bias at the current decoding step, defined as the logits the language backbone assigns when no visual input is provided. Subtracting it raw can amplify tail tokens, because a strongly negative prior logit becomes a large positive score after subtraction, which invites ungrammatical output. Following VCD \cite{leng2024mitigating}, we bound the contrast to an adaptive plausibility set:
+\begin{equation}\label{eq:head}
+V_{\text{head}}(Y_{<t}) \;=\; \bigl\{\, y \in V \,:\, P_{\text{std}}(y_{t} \mid X_{v}, X_{t}, Y_{<t}) \geq \beta\, \max_{w \in V} P_{\text{std}}(w_{t} \mid X_{v}, X_{t}, Y_{<t})\,\bigr\}.
+\end{equation}
+
+For every plausible token, the contrastive logits combine the expert and counterfactual terms; all other tokens are truncated to negative infinity:
+\begin{equation}\label{eq:cd}
+z_{\text{CD}}(y_{t}) \;=\; (1 + \alpha)\, z_{\text{std}}(y_{t}) \;-\; \alpha\, z_{\text{cf}}(y_{t}), \qquad \forall\, y_{t} \in V_{\text{head}}.
+\end{equation}
+
+where $\alpha$ controls the penalty strength. The calibrated distribution is the softmax over this truncated space, and $Y_{\text{CD}}$ is decoded greedily. Because System 2 never samples, the truncation cannot manufacture greedy-search gains of the kind documented under sampling decoders \cite{yin2025mirage,bendre2026rethinking}; the contrast acts only where the gate detected conflict. Algorithm~\ref{alg:egcd} summarizes the full procedure.
+
+\begin{algorithm}
+\caption{Entropy-Gated Contrastive Decoding (EGCD)}\label{alg:egcd}
+\begin{algorithmic}[1]
+\Require Frozen VLM $p_{\theta}$ with logit function $z_{\theta}$
+\Require Multimodal input $(X_{v}, X_{t})$
+\Require Entropy threshold $\tau$, contrastive strength $\alpha$, plausibility threshold $\beta$
+\Require Maximum decoding length $T$
+\State $P_{\text{std}} \leftarrow \text{softmax}\bigl(z_{\theta}(y_{1} \mid X_{v}, X_{t})\bigr)$
+\State $H(Y_{1}) \leftarrow -\sum_{y \in V} P_{\text{std}}(y)\, \log P_{\text{std}}(y)$
+\If{$H(Y_{1}) < \tau$}
+  \For{$t = 1$ \textbf{to} $T$}
+    \State $y_{t} \leftarrow \operatorname*{arg\,max}\, p_{\theta}(y_{t} \mid X_{v}, X_{t}, Y_{<t})$
+  \EndFor
+  \State \Return $Y_{\text{std}}$
+\Else
+  \For{$t = 1$ \textbf{to} $T$}
+    \State $z_{\text{std}} \leftarrow z_{\theta}(y_{t} \mid X_{v}, X_{t}, Y_{<t})$;\; $P_{\text{std}} \leftarrow \text{softmax}(z_{\text{std}})$
+    \State $z_{\text{cf}}(y_{t}) \leftarrow z_{\theta}(y_{t} \mid X_{t}, Y_{<t})$
+    \State $V_{\text{head}} \leftarrow \{\, y \in V \,:\, P_{\text{std}}(y) \geq \beta \cdot \max_{w} P_{\text{std}}(w)\,\}$
+    \State $z_{\text{CD}}(y) \leftarrow (1 + \alpha)\, z_{\text{std}}(y) - \alpha\, z_{\text{cf}}(y)$ \textbf{for} $y \in V_{\text{head}}$; $-\infty$ \textbf{otherwise}
+    \State $y_{t} \leftarrow \operatorname*{arg\,max}\, \text{softmax}(z_{\text{CD}})$
+    \If{$y_{t} = \langle\text{EOS}\rangle$} \textbf{break} \EndIf
+  \EndFor
+  \State \Return $Y_{\text{CD}}$
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Setup}\label{sec:experiments}
+
+\subsection{Evaluation Benchmark}\label{subsec:benchmark}
+
+We evaluate on the AMBER benchmark \cite{wang2023amber}, restricted to its Discriminative-Relation subset: 1,664 image-text pairs of binary Yes/No questions about spatial alignment and physical contact. Existence suites such as POPE \cite{li2023bevaluating} and captioning metrics such as CHAIR \cite{rohrbach2018object} rarely stress relational binding, and AMBER's authors report affirmative bias across mainstream models, with Yes-ratios exceeding No-ratios for nearly every evaluated system. The subset is balanced by construction, its annotated objects stay outside common visual-instruction tuning corpora, and relational verification requires shifting attention to secondary objects, which makes it a direct probe of Visual Inertia. Scoring well on this subset requires reading the relation out of the image, which is the property we need from a test bed.
+
+\subsection{Target Vision-Language Models}\label{subsec:models}
+
+The suite spans seven open-weight models from four architectural families. Qwen2-VL-2B and Qwen2.5-VL-7B use native dynamic resolution and multimodal rotary position embeddings \cite{bai2025qwen25vl}. SmolVLM2-2.2B continues the Idefics lineage in a compact form \cite{marafioti2025smolvlm,laurencon2024matters}, alongside Idefics2-8B itself \cite{laurencon2024matters}. LLaVA-1.5-7B and LLaVA-v1.6-Mistral-7B pair CLIP vision encoders with Vicuna and Mistral backbones through MLP projection layers \cite{liu2023visual,liu2024improved}. The last model in the suite is Phi-3-Vision-4.2B \cite{abdin2024phi3}. Encoders, connectors, and language backbones vary across all seven, which is deliberate: it lets us see how the architecture itself shapes the response to a decoding intervention.
+
+\subsection{Evaluation Metrics}\label{subsec:metrics}
+
+Recall is computed on the positive split of the benchmark, where the ground-truth relation holds and the expected answer is Yes. Specificity comes from the negative, hallucination-prone split, where the relation is false and an affirmative shortcut yields no gain \cite{yin2025mirage}. With True Positives defined as correct Yes answers to true relations, False Negatives as unjustified No answers to true relations, False Positives as hallucinated Yes answers to false relations, and True Negatives as correct No answers to false relations, the metrics are:
+\begin{align}
+\text{Recall} &= \frac{\text{True Positives}}{\text{True Positives} + \text{False Negatives}}, \label{eq:recall}\\
+\text{Specificity} &= \frac{\text{True Negatives}}{\text{True Negatives} + \text{False Positives}}. \label{eq:spec}
+\end{align}
+
+Balanced Accuracy is the mean of Recall and Specificity \cite{brodersen2010balanced}, one term from each split:
+\begin{equation}\label{eq:balacc}
+\text{Balanced Accuracy} = \frac{\text{Recall} + \text{Specificity}}{2}.
+\end{equation}
+
+Only a method that restores visual grounding moves both terms at once.
+
+\subsection{Baseline Configurations and Implementation Constraints}\label{subsec:baselines}
+
+All runs are zero-shot, half-precision, greedy decoding with temperature zero for reproducibility. EGCD uses $\alpha = 1.0$ and $\beta = 0.1$, the defaults established for visual contrastive decoding \cite{leng2024mitigating}. The gate threshold is the one design choice that varies per model. We split the 1,664 relation pairs into a tuning half (831 pairs) and a held-out half (833 pairs), select the threshold on the tuning half over the grid $[0.550, 0.750]$ in steps of $0.01$, and report every number in this paper on the held-out half; the split is fixed and identical for all models. We compare five decoding regimes per model: the greedy baseline, universal CD+APC applied at every step, EGCD, and two published baselines, VCD and SID (Section~\ref{subsec:contrastive}), applied at every step with the same $\alpha$ and $\beta$.
+
+\section{Results and Analysis}\label{sec:results}
+
+The evaluation covers the 833 held-out relational pairs across seven models in zero-shot, half-precision settings. We report three axes: gains on biased architectures, the boundary of contrastive interventions, and the dynamics of the gate itself. Throughout, EGCD denotes the gated method at its per-model operating point $\tau^{*}$, universal CD+APC denotes the same contrastive arithmetic applied at every step of every query, VCD and SID denote the two published baselines of Section~\ref{subsec:contrastive} applied the same way, and Baseline denotes plain greedy decoding.
+
+\subsection{Quantitative Relational Grounding Results}\label{subsec:quant}
+
+Table~\ref{tab:main} summarizes the five decoding regimes. Three patterns stand out. Biased models improve sharply under EGCD. Balanced models are damaged by universal CD+APC, in one case catastrophically. On the held-out split EGCD never falls below its baseline, and it matches universal CD+APC wherever that method helps.
+
+\begin{table}[h]
+\caption{Held-out results for the five decoding regimes. EGCD uses the per-model threshold selected on the tuning half; VCD and SID are applied at every decoding step with the same $\alpha$ and $\beta$ as CD+APC.}\label{tab:main}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+\textbf{Model} & \textbf{Regime} & \textbf{Recall (\%)} & \textbf{Specificity (\%)} & \textbf{Bal.\ Acc.\ (\%)} \\
+\midrule
+\multirow{5}{*}{\textbf{Qwen2-VL-2B}}
+ & Greedy baseline            & 49.39 & 93.62 & 71.50 \\
+ & Universal CD+APC           & 76.43 & 79.13 & 77.78 \\
+ & \textbf{EGCD (ours) $\tau = 0.70$} & \textbf{75.41} & \textbf{86.38} & \textbf{80.89} \\
+ & VCD                        & 49.39 & 93.62 & 71.50 \\
+ & SID                        & 49.39 & 93.62 & 71.50 \\
+\midrule
+\multirow{5}{*}{\textbf{Phi-3-Vision-4.2B}}
+ & Greedy baseline            & 48.77 & 91.59 & 70.18 \\
+ & Universal CD+APC           & 76.02 & 78.84 & 77.43 \\
+ & \textbf{EGCD (ours) $\tau = 0.62$} & \textbf{71.52} & \textbf{83.48} & \textbf{77.50} \\
+ & VCD                        & 44.47 & 92.17 & 68.32 \\
+ & SID                        & 45.70 & 93.91 & 69.80 \\
+\midrule
+\multirow{5}{*}{\textbf{SmolVLM2-2.2B}}
+ & Greedy baseline            & 33.40 & 94.20 & 63.80 \\
+ & Universal CD+APC           & 51.02 & 84.93 & 67.98 \\
+ & \textbf{EGCD (ours) $\tau = 0.68$} & \textbf{49.18} & \textbf{86.96} & \textbf{68.07} \\
+ & VCD                        & 57.38 & 84.06 & 70.72 \\
+ & SID                        & 35.04 & 93.91 & 64.48 \\
+\midrule
+\multirow{5}{*}{\textbf{Qwen2.5-VL-7B}}
+ & Greedy baseline            & 62.30 & 99.42 & 80.86 \\
+ & Universal CD+APC           & 69.47 & 96.23 & 82.85 \\
+ & \textbf{EGCD (ours) $\tau = 0.65$} & \textbf{67.01} & \textbf{98.55} & \textbf{82.78} \\
+ & VCD                        & 61.27 & 98.55 & 79.91 \\
+ & SID                        & 62.09 & 99.42 & 80.76 \\
+\midrule
+\multirow{5}{*}{\textbf{Idefics2-8B}}
+ & Greedy baseline            & 74.18 & 91.88 & 83.03 \\
+ & Universal CD+APC           & 73.77 & 92.17 & 82.97 \\
+ & \textbf{EGCD (ours) $\tau = 0.69$} & \textbf{73.98} & \textbf{92.17} & \textbf{83.07} \\
+ & VCD                        & 75.41 & 89.57 & 82.49 \\
+ & SID                        & 74.18 & 91.88 & 83.03 \\
+\midrule
+\multirow{5}{*}{\textbf{LLaVA-1.5-7B}}
+ & Greedy baseline            & 75.00 & 78.55 & 76.78 \\
+ & Universal CD+APC           & 29.30 & 96.81 & 63.06 \\
+ & \textbf{EGCD (ours) $\tau = 0.70$} & \textbf{75.00} & \textbf{78.55} & \textbf{76.78} \\
+ & VCD                        & 76.84 & 75.07 & 75.96 \\
+ & SID                        & 75.00 & 78.55 & 76.78 \\
+\midrule
+\multirow{5}{*}{\textbf{LLaVA-v1.6-Mistral-7B}}
+ & Greedy baseline            & 78.36 & 93.76 & 86.06 \\
+ & Universal CD+APC           & 64.92 & 86.36 & 75.64 \\
+ & \textbf{EGCD (ours) $\tau = 0.71$} & \textbf{78.36} & \textbf{93.76} & \textbf{86.06} \\
+ & VCD                        & 76.72 & 90.42 & 83.57 \\
+ & SID                        & 78.36 & 93.76 & 86.06 \\
+\botrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:balacc} shows the balanced-accuracy comparison. On Qwen2-VL-2B, EGCD adds 9.39 points over greedy decoding and 3.11 over universal CD+APC. That 3.11 gap is the only improvement over CD that holds up under a McNemar test \cite{dietterich1998approximate} on paired items ($p = 0.002$); Phi-3-Vision-4.2B gains 7.31. On Phi-3-Vision-4.2B, SmolVLM2-2.2B, and Idefics2-8B, the gap to CD sits inside sampling noise ($p > 0.99$). The VCD and SID rows make the same point from a different angle. VCD uses a noised image as its amateur, and it is the strongest single method on SmolVLM2-2.2B (70.72, $p = 0.032$ over universal CD+APC). On Qwen2-VL-2B, where the headroom is largest, it does not flip a single held-out answer. SID uses the model's own shallow layer as its amateur; it stays within 0.7 points of the greedy baseline on every model and changes no answer on Qwen2-VL-2B, Idefics2-8B, or LLaVA-1.5-7B. A universal amateur helps when its bias lines up with the model's failure mode, and does nothing when it does not. The gate is what connects the corrective pathway to the queries that actually need it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig2.png}
+\caption{Balanced accuracy on the held-out half for the seven models under greedy decoding, Universal CD+APC, VCD, SID, and EGCD, ordered by EGCD's gain over greedy decoding.}\label{fig:balacc}
+\end{figure}
+
+\subsection{Resolving Visual Inertia in Biased Architectures}\label{subsec:resolve}
+
+SmolVLM2-2.2B and Qwen2-VL-2B start with baseline recalls of 33.40\% and 49.39\%, respectively. In both cases, cross-attention stagnates and language priors dominate, so the models answer No to relations that actually hold. Universal CD+APC corrects this bias by shifting the output distribution in the opposite direction. On Qwen2-VL-2B, Recall climbs to 76.43\%, but Specificity falls from 93.62\% to 79.13\%. The shift is one-sided, and it leaves the generation manifold unstable. The model has traded one bias for another, and every answer now comes out of a distorted distribution. Figure~\ref{fig:delta} traces the net effect of this trade-off on balanced accuracy.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig3.png}
+\caption{Change in balanced accuracy relative to greedy decoding, per model and method: Universal CD+APC buys its gains with a 10--14 point collapse on the two LLaVA models, while EGCD keeps the gains without the collapse.}\label{fig:delta}
+\end{figure}
+
+The gate makes the recall--specificity trade less costly rather than removing it. At the selected threshold, Qwen2-VL-2B reaches 80.89\% balanced accuracy, with Recall at 75.41\% and Specificity at 86.38\%: Recall ends up about a point short of universal CD (76.43\%) while Specificity falls far less (CD drops to 79.13\%). SmolVLM2 peaks at its threshold with 68.07\%, getting back suppressed visual evidence without giving up Specificity. Figure~\ref{fig:recspec} compares Recall and Specificity for the four bias-affected models under all five decoding regimes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig4.png}
+\caption{Recall and Specificity on the held-out half for the four bias-affected models, where Universal CD+APC buys its recall by spending specificity and EGCD recovers most of the recall at a fraction of the specificity cost.}\label{fig:recspec}
+\end{figure}
+
+Figure~\ref{fig:sweep} sweeps $\tau$ over $[0.550, 0.750]$ for the four bias-affected architectures. Each curve rises above both reference lines, hits a peak ($\tau^{*} = 0.70, 0.62, 0.68$, and $0.65$ for Qwen2-VL-2B, Phi-3-Vision-4.2B, SmolVLM2-2.2B, and Qwen2.5-VL-7B), and then falls back toward baseline once $\tau$ moves past the entropy mass of genuine conflicts.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig5.png}
+\caption{Balanced accuracy across the entropy-threshold sweep on the tuning half for the four bias-affected models; the star marks each model's selected threshold $\tau^{*}$.}\label{fig:sweep}
+\end{figure}
+
+\subsection{The Architectural Boundary of Contrastive Interventions}\label{subsec:boundary}
+
+Contrastive decoding is not a universal tool. LLaVA-1.5-7B and LLaVA-v1.6-Mistral-7B start with recalls of 75.00\% and 78.36\%, which indicates that their connectors produce visual tokens that already compete on equal terms with text. Universal CD+APC damages exactly these models: on LLaVA-1.5-7B, balanced accuracy falls to 63.06\% with Recall dropping to 29.30\%, and on LLaVA-v1.6-Mistral-7B it drops by 10.42 points. We refer to this as contrastive overcompensation. In a model that is already balanced, subtracting a vision-free amateur over-penalizes the syntactic and structural priors that the model still relies on, and recall suffers as a result. The same arithmetic that improves Qwen2-VL-2B ends up removing corrections that a balanced model was already making correctly.
+
+The gate handles this distinction without any explicit instruction. Balanced models maintain compact first-token distributions, entropy rarely crosses $\tau$, and the gate does not activate. As a result, EGCD preserves 76.78\% on LLaVA-1.5-7B and 86.06\% on LLaVA-v1.6-Mistral-7B, identical to greedy decoding. Figure~\ref{fig:sound} shows the sweep for the structurally sound architectures: Idefics2-8B does not differ from either regime ($p > 0.99$), and LLaVA-1.5-7B returns its baseline exactly. The router treats the contrastive pass as conditional rather than mandatory, and at the selected operating points the output matches the baseline whenever no conflict is present.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig6.png}
+\caption{The same sweep for the three structurally sound models, where EGCD tracks the greedy baseline everywhere while Universal CD+APC falls up to 14 points below it.}\label{fig:sound}
+\end{figure}
+
+\subsection{First-Token Entropy and Gating Threshold Dynamics}\label{subsec:dynamics}
+
+The sweep shows what the routing decision is actually doing. For Qwen2-VL-2B, balanced accuracy rises to its peak at the selected threshold (held-out numbers in Table~\ref{tab:main}) as more uncertain queries are sent to System 2 (Figure~\ref{fig:sweep}). Past 0.70 the curve slides back toward the greedy baseline. A gate set too high lets real conflicts slip through, and Visual Inertia is left untouched. The response is hill-shaped, and where the peak sits depends on each model's entropy distribution. That is why no single $\tau$ works for all seven models.
+
+The structurally sound models show the flat side of the same pattern. Idefics2-8B stays inside a 0.7-point band across the whole sweep (Figure~\ref{fig:sound}), which means its first-token entropy sits below the conflict threshold during normal operation, so the costlier contrastive pass runs only when there is real trouble. Figure~\ref{fig:all} gives the full sweep for all seven models, and the tuning-half numbers are in Appendix~\ref{app:sweep}. The two views together describe a gate that gets the cost of the intervention right in both directions. It pays for contrast where conflict is present and withholds it where there is none, which keeps both fluency and inference cost in line.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig7.png}
+\caption{Gain over greedy decoding across the entropy-threshold sweep for all seven models: every curve returns to zero as $\tau$ grows, and on the sound models a loose threshold costs up to 14 points.}\label{fig:all}
+\end{figure}
+
+The gate routes 40.9\% of held-out queries on Qwen2-VL-2B, 38.8\% on Phi-3-Vision-4.2B, 28.2\% on SmolVLM2-2.2B, 13.2\% on Qwen2.5-VL-7B, 2.2\% on Idefics2-8B and none on LLaVA-1.5-7B or LLaVA-v1.6-Mistral-7B. Shuffled routing at the same rate recovers only part of the gain (64.96 against 68.07 on SmolVLM2-2.2B, 74.04 against 80.89 on Qwen2-VL-2B, 72.97 against 77.50 on Phi-3-Vision-4.2B), so most of the improvement comes from choosing the right queries rather than from intervening often.
+
+\section{Conclusion and Future Work}\label{sec:conclusion}
+
+\subsection{Summary of Contributions}\label{subsec:summary}
+
+This paper treats relational hallucination as a decoding failure with a traceable mechanism behind it, Visual Inertia: cross-attention settles on its first targets, grounding decays with every token generated, and the language priors end up writing the answer \cite{gong2026attention}. EGCD answers it with a query-level entropy gate that fires a counterfactual contrastive pass only where vision-text conflict is active, bounded by an Adaptive Plausibility Constraint and decoded greedily.
+
+Across the seven models on AMBER's relation subset, the gate separated the suite without being told which was which. The biased architectures gained, Qwen2-VL-2B by 9.39 points and Phi-3-Vision-4.2B by 7.31, and without the specificity loss that universal CD leaves behind. The structurally sound models kept their numbers: universal CD had pushed LLaVA-1.5-7B down to 63.06\%, while EGCD handed back its 76.78\% baseline unchanged. One shared threshold for the whole suite keeps most of the gains on the biased models but gives up the idle-gate safety on LLaVA-1.5-7B, where a suite-wide $\tau = 0.69$ drops balanced accuracy to 73.19 against the 76.78 baseline. What comes out is a conditional, architecture-aware use of contrastive decoding that spends its correction only on the queries that need it.
+
+\subsection{Limitations and Future Work}\label{subsec:future}
+
+Several extensions look worth the effort. The first is calibration-free gating: entropy percentiles estimated on the fly, or one shared threshold fitted across a model family, would remove the per-model sweep that $\tau^{*}$ currently requires. Open-ended generation is the second and harder target, since the first-token distribution no longer concentrates the whole decision in one place and some form of step-level probe would be needed. The third is routing inside reasoning models: Octopus learns per-step strategy selection \cite{suo2025octopus}, dual-process search keeps spreading through chain-of-thought systems \cite{cheng2025think,li2025system}, and a training-free entropy signal is a natural candidate for deciding when those pipelines should slow down and think twice.
+
+\backmatter
+
+\bmhead{Supplementary information}
+
+The complete entropy-threshold sweep results on the tuning half are reported in Appendix~\ref{app:sweep}.
+
+\bmhead{Acknowledgements}
+
+The authors thank the anonymous reviewers for constructive feedback that improved the presentation of this work.
+
+\section*{Declarations}
+
+\begin{itemize}
+\item \textbf{Funding:} Not applicable.
+\item \textbf{Conflict of interest/Competing interests:} The authors declare no competing interests.
+\item \textbf{Ethics approval and consent to participate:} Not applicable.
+\item \textbf{Consent for publication:} All authors consent to the publication of this manuscript.
+\item \textbf{Data availability:} The AMBER benchmark used in this study is publicly available at \url{https://github.com/junyangwang0410/AMBER}.
+\item \textbf{Materials availability:} Not applicable.
+\item \textbf{Code availability:} The EGCD inference pipeline and evaluation scripts will be made available upon publication.
+\item \textbf{Author contribution:} All authors contributed equally to the design of the methodology, the implementation of the experiments, and the writing of the manuscript. All authors read and approved the final manuscript.
+\end{itemize}
+
+\begin{appendices}
+
+\section{Complete Entropy-Threshold Sweep Results}\label{app:sweep}
+
+This appendix reports the balanced accuracy of the entropy-threshold sweep on the tuning half. It is the selection record: each model's peak here is the operating point $\tau^{*}$ that Section~\ref{sec:results} evaluates on the held-out half. The selected thresholds are 0.70 (Qwen2-VL-2B), 0.62 (Phi-3-Vision-4.2B), 0.68 (SmolVLM2-2.2B), 0.65 (Qwen2.5-VL-7B), 0.69 (Idefics2-8B), 0.70 (LLaVA-1.5-7B), and 0.71 (LLaVA-v1.6-Mistral-7B); Recall and Specificity at each operating point appear in Table~\ref{tab:main}. Figure~\ref{fig:heatmap} renders the held-out results of Table~\ref{tab:main} as three heatmaps and Figure~\ref{fig:gain} summarizes the gain each selected threshold buys.
+
+\begin{sidewaystable}
+\caption{Balanced accuracy (\%) across the entropy-threshold sweep on the tuning half for all seven models; each model's peak on this grid is its selected operating point $\tau^{*}$, evaluated on the held-out half in Table~\ref{tab:main}.}\label{tab:sweep}
+\begin{tabular*}{\textheight}{@{\extracolsep\fill}lccccccc@{}}
+\toprule
+$\tau$ & \textbf{Qwen2-VL-2B} & \textbf{Phi-3-Vision-4.2B} & \textbf{SmolVLM2-2.2B} & \textbf{Qwen2.5-VL-7B} & \textbf{Idefics2-8B} & \textbf{LLaVA-1.5-7B} & \textbf{LLaVA-v1.6-Mistral-7B}\\
+\midrule
+0.55 & 75.95 & 76.17 & 66.27 & 79.99 & 81.11 & 61.47 & 77.41 \\
+0.56 & 75.95 & 76.50 & 66.27 & 79.78 & 81.11 & 61.47 & 77.51 \\
+0.57 & 75.95 & 76.65 & 66.27 & 79.87 & 81.11 & 61.58 & 77.72 \\
+0.58 & 76.24 & 76.88 & 66.27 & 79.97 & 81.11 & 61.68 & 77.97 \\
+0.59 & 76.24 & 76.61 & 66.27 & 79.97 & 81.11 & 61.78 & 78.37 \\
+0.60 & 76.39 & 76.80 & 66.27 & 79.97 & 81.11 & 61.99 & 78.52 \\
+0.61 & 76.39 & 76.60 & 66.27 & 79.97 & 81.11 & 62.30 & 78.87 \\
+0.62 & 76.68 & \textbf{77.08} & 66.27 & 79.97 & 81.11 & 62.60 & 79.37 \\
+0.63 & 76.72 & 76.71 & 66.27 & 80.37 & 81.11 & 62.71 & 79.96 \\
+0.64 & 76.72 & 76.34 & 66.27 & 80.82 & 81.11 & 63.69 & 80.38 \\
+0.65 & 77.45 & 75.87 & 66.56 & \textbf{80.92} & 81.11 & 64.57 & 81.00 \\
+0.66 & 77.74 & 75.34 & 66.56 & 80.82 & 81.22 & 65.06 & 81.48 \\
+0.67 & 77.63 & 74.75 & 67.00 & 80.76 & 81.22 & 65.71 & 82.15 \\
+0.68 & 77.47 & 73.60 & \textbf{67.02} & 80.55 & 81.36 & 68.02 & 83.03 \\
+0.69 & 77.93 & 72.56 & 66.39 & 80.14 & \textbf{81.75} & 72.25 & 83.68 \\
+0.70 & \textbf{78.00} & 70.47 & 65.27 & 79.88 & 81.51 & \textbf{75.56} & 86.01 \\
+0.71 & 77.15 & 68.49 & 64.08 & 79.47 & 81.51 & 75.56 & \textbf{86.06} \\
+0.72 & 76.63 & 68.47 & 63.67 & 79.06 & 81.51 & 75.56 & 86.06 \\
+0.73 & 74.25 & 68.47 & 63.67 & 79.00 & 81.51 & 75.56 & 86.06 \\
+0.74 & 72.04 & 68.47 & 63.67 & 79.14 & 81.51 & 75.56 & 86.06 \\
+0.75 & 71.57 & 68.47 & 63.67 & 79.04 & 81.51 & 75.56 & 86.06 \\
+\botrule
+\end{tabular*}
+\end{sidewaystable}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig8.png}
+\caption{The held-out results of Table~\ref{tab:main} rendered as three heatmaps (Recall, Specificity, Balanced Accuracy; seven models by five decoding regimes), with the EGCD column outlined.}\label{fig:heatmap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{fig9.png}
+\caption{Gain over greedy decoding at each model's selected threshold $\tau^{*}$ on the tuning half: the gate buys the most exactly where hallucination bias is largest.}\label{fig:gain}
+\end{figure}
+
+\end{appendices}
+
+\bibliography{references}
+
+\end{document}
