@@ -23,6 +23,10 @@
 \renewcommand{\floatpagefraction}{0.8}
 \renewcommand{\dblfloatpagefraction}{0.8}
 
+% Allow double-column floats to be placed at the bottom of the current page,
+% so a wide figure lands on the same page as the paragraph that mentions it.
+\usepackage{stfloats}
+
 % Clickable, colored cross-references and citations
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 
@@ -155,7 +159,7 @@ z_{\text{CD}}(y) \;=\;& (1 + \alpha)\, z_{\text{std}}(y) \;-\; \alpha\, z_{\text
 
 The calibrated distribution is the softmax over this truncated space (equivalently, proportional to $P_{\text{std}}(y)^{1+\alpha} / P_{\text{cf}}(y)^{\alpha}$ on $V_{\text{head}}$), and $Y_{\text{CD}}$ is decoded greedily. Because System 2 never samples, the truncation cannot manufacture greedy-search gains of the kind documented under sampling decoders \cite{yin2025mirage,bendre2026rethinking}; the contrast acts only where the gate routed the query. Algorithm~\ref{alg:egcd} summarises the full procedure.
 
-\begin{algorithm}
+\begin{algorithm}[!htb]
 \caption{Entropy-Gated Contrastive Decoding (EGCD)}\label{alg:egcd}
 \begin{algorithmic}[1]
 \Require Frozen VLM $p_{\theta}$ with logit function $z_{\theta}$
@@ -232,7 +236,7 @@ The evaluation covers the 842 held-out relational pairs across seven models in z
 
 Table~\ref{tab:main} summarises the five decoding regimes. Three patterns stand out. Throughout, \emph{biased} and \emph{balanced} describe observed behaviour under contrastive decoding rather than measured architectural properties. Biased models improve sharply under EGCD. Balanced models are damaged by universal CD+APC, in one case catastrophically. On the held-out split EGCD never falls more than 0.25 points below its baseline, and it never trails universal CD+APC by more than 0.57 points on any model where CD+APC improves on greedy decoding, while avoiding the catastrophic collapses on the LLaVA models.
 
-\begin{table*}[!t]
+\begin{table*}[!tbp]
 \centering
 \caption{Held-out results (842 queries) for the five decoding regimes. EGCD uses the per-model threshold $\tau^{*}$ selected on the tuning half; VCD and LLC are applied at every decoding step. VCD uses $\alpha = 1.0$ and $\beta = 0.1$ as in CD+APC; LLC reads amateur logits from layer 3 and contrasts them with the final-layer expert logits.}\label{tab:main}
 \begin{tabular}{@{}llccc@{}}
